@@ -1,0 +1,70 @@
+name: Build Monster Lab for Mac
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14          # Apple Silicon (M-series) runner
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMONSTERLAB_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Make a test voice recording
+        run: |
+          say -o voice.aiff "Welcome back to the DeGrave Brothers. Something is moving in the basement, and it knows my name."
+          afconvert -f WAVE -d LEI24@48000 voice.aiff voice.wav
+
+      - name: Test the audio engine (every preset, every effect, stacks, save/load)
+        run: |
+          ./build/MonsterLabRenderTest_artefacts/Release/MonsterLabRenderTest voice.wav engine-test-output
+
+      - name: Test the app itself (load, Demon + VHS, adjust, export)
+        continue-on-error: true
+        run: |
+          mkdir -p gui-test
+          MONSTERLAB_SELFTEST="$PWD/voice.wav" MONSTERLAB_SELFTEST_OUT="$PWD/gui-test" \
+            "build/MonsterLab_artefacts/Release/Monster Lab.app/Contents/MacOS/Monster Lab" &
+          pid=$!
+          for i in $(seq 1 180); do
+            if grep -q "^done" gui-test/selftest.log 2>/dev/null; then break; fi
+            sleep 1
+          done
+          kill $pid 2>/dev/null || true
+          cat gui-test/selftest.log
+          grep -q "export ok" gui-test/selftest.log
+
+      - name: Sign (ad-hoc) and zip the app
+        run: |
+          APP="build/MonsterLab_artefacts/Release/Monster Lab.app"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --verbose "$APP"
+          ditto -c -k --keepParent "$APP" "Monster-Lab-mac.zip"
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Monster-Lab-mac
+          path: Monster-Lab-mac.zip
+          retention-days: 30
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            gui-test
+            engine-test-output
+          retention-days: 7
