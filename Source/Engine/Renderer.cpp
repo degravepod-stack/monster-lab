@@ -387,24 +387,34 @@ static void envelope (const Buf& b, std::vector<float>& env, double sr, float at
 
 static void grit (Buf& b, double sr, float amt, juce::uint32 seed)
 {
+    // Vocal rasp without added noise:
+    //  1. level-tracking saturation of the mid band (harmonics that follow the voice,
+    //     so quiet tails and breaths don't crackle)
+    //  2. slow, smooth amplitude roughness (20-45 Hz), like an irregular, strained throat
+    //  3. gentle low-pass on the new harmonics so it never gets fizzy
     const float a = amt / 100.0f;
     std::vector<float> env;
-    envelope (b, env, sr, 3, 50);
-    juce::Random r ((juce::int64) seed);
-    auto noiseBp = Biquad::bp (sr, 2800, 0.6);
-    auto roughLp = Biquad::lp (sr, 260);
-    auto rasp = Biquad::hp (sr, 900);
+    envelope (b, env, sr, 5, 80);
+    float peakEnv = 1.0e-6f;
+    for (auto e : env) peakEnv = juce::jmax (peakEnv, e);
+
+    SmoothNoise rough ((juce::int64) seed, 32.0, sr);
+    auto bandHp = Biquad::hp (sr, 350), bandLp = Biquad::lp (sr, 3200), smooth = Biquad::lp (sr, 4500);
+    const float drive = 2.0f + 10.0f * a;
+
     for (int i = 0; i < b.getNumSamples(); ++i)
     {
-        float rough = roughLp.tick (r.nextFloat() * 2 - 1, 0) * 4.0f;    // random AM = vocal roughness
-        float noise = noiseBp.tick (r.nextFloat() * 2 - 1, 0);
+        const float e = env[(size_t) i];
+        const float gate = juce::jlimit (0.0f, 1.0f, (e / peakEnv - 0.04f) * 8.0f);   // only where there's voice
+        const float norm = 1.0f / juce::jmax (0.02f * peakEnv, e);
+        const float am = 1.0f + 0.35f * a * gate * rough.next();
         for (int ch = 0; ch < 2; ++ch)
         {
             float x = b.getSample (ch, i);
-            float hi = rasp.tick (x, ch);
-            float clipped = std::tanh (hi * 10.0f) * juce::jmin (1.0f, env[(size_t) i] * 4.0f) * 0.15f;
-            float y = x * (1.0f + a * 0.9f * rough) + a * (clipped + noise * env[(size_t) i] * 1.6f);
-            b.setSample (ch, i, y);
+            float mid = bandLp.tick (bandHp.tick (x, ch), ch);
+            float shaped = std::tanh (mid * norm * drive) / (norm * drive) * 2.0f;   // level-matched, harmonic-rich
+            float rasp = smooth.tick (shaped - mid, ch);                             // just the added harmonics
+            b.setSample (ch, i, (x + a * gate * 1.5f * rasp) * am);
         }
     }
 }

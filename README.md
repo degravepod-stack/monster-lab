@@ -29,7 +29,7 @@ After that it opens with a normal double-click.
 - **Right panel:** drag a WAV (or AIFF/FLAC) onto the waveform, or click OPEN AUDIO.
 - **Left panel:** click a preset. Each click *adds* a new layer on top; nothing is replaced.
 - **Center top (the stack):** layers process top to bottom. Each row has an on/off light, a wet/dry blend, move up/down, duplicate, save as preset, and delete. Double-click a name to rename it.
-- **Center bottom:** every effect of the selected layer. Each effect has its own on/off light and each section (Voice, Texture, Sci-Fi, Space, Media) has a master switch. Moving any control switches its effect on. Double-click a slider to reset it; click the number to type a value.
+- **Center bottom:** every effect of the selected layer. Each effect has its own on/off light and each section (Voice, Texture, Sci-Fi, Space, Media) has a master switch. Moving any control switches its effect on. Each section's **RESET** button puts that section back to how the layer started, so experiment freely. Double-click a slider to reset it; click the number to type a value.
 - **A / B:** switch between the original and the processed result while playing. Space bar plays/pauses.
 - **EXPORT 24-BIT WAV** writes a new file next to the original.
 - **SAVE / LOAD CHARACTER** stores the whole stack as a `.monster` file (`Documents/Monster Lab/Characters`). Saved layer presets live in `Documents/Monster Lab/Layer Presets` and appear under MY LAYER PRESETS.
@@ -49,7 +49,7 @@ Nothing here is a placeholder. Where an effect is a simpler model than a commerc
 | Creature Size | Combined pitch + formant shift in the same Rubber Band pass, plus a low (bigger) or high (smaller) body resonance |
 | Bass | Low-shelf EQ |
 | Multiple Voices | 1–6 extra Rubber Band pitch-shifted copies, detuned, delayed and panned |
-| Grit | Random amplitude roughness + clipped high band + envelope-following noise |
+| Grit | Level-tracking saturation of the voice's mid band plus slow, smooth throat roughness. No added noise (v0.3 fix for the crinkly 'plastic bag' sound) |
 | Growl | Jittered amplitude pulses at 15–90 Hz (vocal-fry style) + saturated low band. A modelled growl, not a sampled one |
 | Breath / Whisper | True STFT whisperisation (keeps the voice's spectrum, randomises phase) |
 | Distortion | Asymmetric tanh waveshaper + tone filter |

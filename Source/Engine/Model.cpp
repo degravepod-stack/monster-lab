@@ -9,6 +9,7 @@ Layer::Layer()
     for (int e = 0; e < NumEffects; ++e)
         for (int i = 0; i < kMaxParams; ++i)
             fx[(size_t) e].p[i] = t[(size_t) e].p[i].label ? t[(size_t) e].p[i].def : 0.0f;
+    captureStart();
 }
 
 juce::var Layer::toVar() const
@@ -68,6 +69,7 @@ Layer Layer::fromVar (const juce::var& v)
                 l.fx[(size_t) e].p[i] = juce::jlimit (ps.min, ps.max, x);
             }
     }
+    l.captureStart();
     return l;
 }
 
@@ -233,6 +235,7 @@ Layer makeBuiltInPreset (const juce::String& name)
                 }
         }
     }
+    l.captureStart();
     return l;
 }
 

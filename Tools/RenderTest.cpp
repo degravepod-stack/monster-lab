@@ -103,6 +103,16 @@ int main (int argc, char** argv)
         std::printf ("%-5s character save/load round trip\n", same ? "OK" : "FAIL");
         if (! same) ++failures;
     }
+    // section reset restores the preset's starting values
+    {
+        auto l = makeBuiltInPreset ("Demon");
+        auto ref = l;
+        l.fx[E_Grit].p[0] = 99; l.fx[E_Robot].on = true; l.sectionOn[Texture] = false; l.fx[E_Pitch].p[0] = 3;
+        l.resetSection (Texture); l.resetSection (SciFi);
+        bool ok = l.fx[E_Grit].p[0] == ref.fx[E_Grit].p[0] && ! l.fx[E_Robot].on && l.sectionOn[Texture] && l.fx[E_Pitch].p[0] == 3;
+        std::printf ("%-5s section reset (and leaves other sections alone)\n", ok ? "OK" : "FAIL");
+        if (! ok) ++failures;
+    }
     std::printf ("\n%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

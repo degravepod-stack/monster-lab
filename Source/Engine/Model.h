@@ -21,6 +21,17 @@ struct Layer
     std::array<EffectState, NumEffects> fx;
     juce::uint32 seed = 1;             // keeps random textures stable between renders
 
+    // The settings the layer started with (preset / loaded file), for the RESET buttons.
+    std::array<EffectState, NumEffects> startFx;
+    bool startSectionOn[NumSections] { true, true, true, true, true };
+    void captureStart()      { startFx = fx; std::copy (sectionOn, sectionOn + NumSections, startSectionOn); }
+    void resetSection (int s)
+    {
+        for (int e = 0; e < NumEffects; ++e)
+            if (effectTable()[(size_t) e].section == s) fx[(size_t) e] = startFx[(size_t) e];
+        sectionOn[s] = startSectionOn[s];
+    }
+
     Layer();                           // all effects off, params at defaults
     bool isActive (int e) const { return enabled && fx[(size_t) e].on && sectionOn[effectTable()[(size_t) e].section]; }
     float v (int e, int i) const       { return fx[(size_t) e].p[i]; }

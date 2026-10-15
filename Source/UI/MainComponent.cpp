@@ -566,6 +566,7 @@ public:
     {
         tiles.clear();
         sections.clear();
+        resets.clear();
         auto* L = main.selectedLayer();
         if (L != nullptr)
         {
@@ -582,6 +583,19 @@ public:
                 };
                 content.addAndMakeVisible (*sec);
                 sections.push_back (std::move (sec));
+
+                auto rs = std::make_unique<juce::TextButton> ("RESET");
+                rs->setTooltip ("Put this section back the way the layer started");
+                rs->onClick = [sp = juce::Component::SafePointer<EffectGrid> (this), s]
+                {
+                    juce::MessageManager::callAsync ([sp, s]   // rebuild() deletes this button
+                    {
+                        if (auto* g = sp.getComponent())
+                            if (auto* l = g->main.selectedLayer()) { l->resetSection (s); g->rebuild(); g->main.parametersChanged(); }
+                    });
+                };
+                content.addAndMakeVisible (*rs);
+                resets.push_back (std::move (rs));
 
                 for (int e = 0; e < NumEffects; ++e)
                 {
@@ -624,7 +638,8 @@ public:
         size_t ti = 0;
         for (int s = 0; s < (int) sections.size(); ++s)
         {
-            sections[(size_t) s]->setBounds (6, y + 6, 260, 22);
+            sections[(size_t) s]->setBounds (6, y + 6, 200, 22);
+            resets[(size_t) s]->setBounds (210, y + 6, 60, 22);
             y += 32;
             int col = 0, rowH = 0;
             while (ti < tiles.size() && tiles[ti].section == s)
@@ -647,6 +662,7 @@ private:
     juce::Component content;
     juce::ToggleButton onlyActive;
     std::vector<std::unique_ptr<juce::ToggleButton>> sections;
+    std::vector<std::unique_ptr<juce::TextButton>> resets;
     std::vector<TileRef> tiles;
 };
 
@@ -1019,7 +1035,7 @@ void MainComponent::paint (juce::Graphics& g)
     g.drawText ("MONSTER LAB", top.withTrimmedLeft (16), juce::Justification::centredLeft);
     g.setColour (C::dim);
     g.setFont (uiFont (13.0f));
-    g.drawText ("creature & vintage voice processor   v0.2", top.withTrimmedLeft (200), juce::Justification::centredLeft);
+    g.drawText ("creature & vintage voice processor   v0.3", top.withTrimmedLeft (200), juce::Justification::centredLeft);
     g.setColour (C::amber.withAlpha (0.5f));
     g.drawHorizontalLine (43, 0, (float) getWidth());
 }
