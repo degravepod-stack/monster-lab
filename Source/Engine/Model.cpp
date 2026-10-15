@@ -5,6 +5,7 @@ namespace ml
 {
 Layer::Layer()
 {
+    std::fill (sectionOn, sectionOn + NumSections, true);
     const auto& t = effectTable();
     for (int e = 0; e < NumEffects; ++e)
         for (int i = 0; i < kMaxParams; ++i)
@@ -32,6 +33,7 @@ juce::var Layer::toVar() const
     {
         auto* eo = new juce::DynamicObject();
         eo->setProperty ("on", fx[(size_t) e].on);
+        if (fx[(size_t) e].file.isNotEmpty()) eo->setProperty ("file", fx[(size_t) e].file);
         for (int i = 0; i < kMaxParams; ++i)
             if (auto* l = t[(size_t) e].p[i].label)
                 eo->setProperty (l, fx[(size_t) e].p[i]);
@@ -61,6 +63,7 @@ Layer Layer::fromVar (const juce::var& v)
         auto eo = effects.getProperty (t[(size_t) e].id, {});
         if (! eo.isObject()) continue;
         l.fx[(size_t) e].on = (bool) eo.getProperty ("on", false);
+        l.fx[(size_t) e].file = eo.getProperty ("file", "").toString();
         for (int i = 0; i < kMaxParams; ++i)
             if (auto* lab = t[(size_t) e].p[i].label)
             {
@@ -157,37 +160,37 @@ namespace
                 { "comp", { 50 } } } },
             { "SCIENCE FICTION", "Space Communications", {
                 { "crush", { 8, 8000, 30 } }, { "reson", { 2, 60 } }, { "band", { 400, 3200 } },
-                { "comp", { 75 } }, { "dropout", { 20, 70 } }, { "hiss", { -40 } } } },
+                { "comp", { 75 } }, { "dropout", { 20, 70 } }, { "hiss", { -74.5f } } } },
             { "SCIENCE FICTION", "Damaged Android", {
                 { "instab", { 50, 6 } }, { "robot", { 70, 120 } }, { "fshift", { -20, 30 } },
                 { "crush", { 6, 6000, 40 } }, { "dropout", { 45, 90 } } } },
             // ------------------------------------------------ MEDIA & VINTAGE
             { "MEDIA & VINTAGE AUDIO", "VHS - Worn Tape", {
-                { "wow", { 30, 0.5f } }, { "flutter", { 18, 9 } }, { "tapesat", { 45 } }, { "band", { 80, 10000 } },
-                { "comp", { 30 } }, { "dropout", { 10, 50 } }, { "hiss", { -40 } } } },
+                { "wow", { 30, 0.5f } }, { "warp", { 15, 30, 0.5f } }, { "flutter", { 18, 9 } }, { "tapesat", { 45 } }, { "band", { 80, 10000 } },
+                { "comp", { 30 } }, { "dropout", { 10, 50 } }, { "hiss", { -74.5f } } } },
             { "MEDIA & VINTAGE AUDIO", "VHS - Tracking Failure", {
-                { "instab", { 25, 4 } }, { "wow", { 60, 0.7f } }, { "flutter", { 35, 11 } }, { "tapesat", { 60 } },
-                { "band", { 120, 7000 } }, { "dropout", { 55, 90 } }, { "hiss", { -34 } }, { "crackle", { 20, -30 } } } },
+                { "instab", { 25, 4 } }, { "warp", { 45, 60, 0.7f } }, { "wow", { 60, 0.7f } }, { "flutter", { 35, 11 } }, { "tapesat", { 60 } },
+                { "band", { 120, 7000 } }, { "dropout", { 55, 90 } }, { "hiss", { -68.5f } }, { "crackle", { 20, -51 } } } },
             { "MEDIA & VINTAGE AUDIO", "Cassette - Old Recording", {
-                { "wow", { 20, 0.7f } }, { "flutter", { 15, 11 } }, { "tapesat", { 40 } }, { "band", { 60, 9000 } },
-                { "comp", { 40 } }, { "hiss", { -36 } } } },
+                { "wow", { 20, 0.7f } }, { "warp", { 8, 25, 0.4f } }, { "flutter", { 15, 11 } }, { "tapesat", { 40 } }, { "band", { 60, 9000 } },
+                { "comp", { 40 } }, { "hiss", { -70.5f } } } },
             { "MEDIA & VINTAGE AUDIO", "Vinyl - Haunted Record", {
                 { "reverb", { 3.0f, 20, 50 } }, { "wow", { 25, 0.55f } }, { "tapesat", { 20 } }, { "band", { 80, 9000 } },
-                { "hiss", { -50 } }, { "crackle", { 45, -22 } } } },
+                { "hiss", { -84.5f } }, { "crackle", { 45, -43 } } } },
             { "MEDIA & VINTAGE AUDIO", "78 RPM Antique Record", {
                 { "dist", { 4, 6000 } }, { "wow", { 15, 1.3f } }, { "reson", { 4, 80 } }, { "band", { 300, 4500 } },
-                { "hiss", { -32 } }, { "crackle", { 70, -18 } } } },
+                { "hiss", { -66.5f } }, { "crackle", { 70, -39 } } } },
             { "MEDIA & VINTAGE AUDIO", "AM Radio", {
-                { "tapesat", { 20 } }, { "reson", { 2, 80 } }, { "band", { 200, 4500 } }, { "comp", { 70 } }, { "hiss", { -45 } } } },
+                { "tapesat", { 20 } }, { "reson", { 2, 80 } }, { "band", { 200, 4500 } }, { "comp", { 70 } }, { "hiss", { -79.5f } } } },
             { "MEDIA & VINTAGE AUDIO", "Shortwave Radio", {
                 { "fshift", { 35, 100 } }, { "band", { 300, 3000 } }, { "comp", { 60 } }, { "dropout", { 30, 70 } },
-                { "hiss", { -30 } }, { "crackle", { 30, -30 } } } },
+                { "hiss", { -64.5f } }, { "crackle", { 30, -51 } } } },
             { "MEDIA & VINTAGE AUDIO", "Walkie-Talkie", {
                 { "dist", { 14, 3500 } }, { "crush", { 10, 16000, 30 } }, { "reson", { 3, 90 } }, { "band", { 400, 3000 } },
-                { "comp", { 80 } }, { "hiss", { -42 } } } },
+                { "comp", { 80 } }, { "hiss", { -76.5f } } } },
             { "MEDIA & VINTAGE AUDIO", "Old Telephone (1990s)", {
                 { "dist", { 4, 3400 } }, { "crush", { 13, 8000, 50 } }, { "reson", { 0, 90 } }, { "band", { 300, 3400 } },
-                { "comp", { 60 } }, { "hiss", { -55 } } } },
+                { "comp", { 60 } }, { "hiss", { -89.5f } } } },
             { "MEDIA & VINTAGE AUDIO", "Vintage Megaphone", {
                 { "dist", { 18, 4000 } }, { "reverb", { 0.8f, 10, 40 } }, { "reson", { 1, 100 } }, { "band", { 500, 4000 } },
                 { "comp", { 85 } } } },
@@ -195,7 +198,7 @@ namespace
                 { "ringmod", { 900, 10 } }, { "crush", { 5, 7000, 70 } }, { "freeze", { 30, 20 } }, { "dropout", { 60, 100 } } } },
             { "MEDIA & VINTAGE AUDIO", "Damaged Film Soundtrack", {
                 { "wow", { 12, 0.4f } }, { "flutter", { 30, 18 } }, { "tapesat", { 25 } }, { "band", { 120, 6000 } },
-                { "comp", { 40 } }, { "dropout", { 20, 60 } }, { "hiss", { -34 } }, { "crackle", { 50, -24 } } } },
+                { "comp", { 40 } }, { "dropout", { 20, 60 } }, { "hiss", { -68.5f } }, { "crackle", { 50, -45 } } } },
         };
         return d;
     }
@@ -247,4 +250,35 @@ juce::File userDataFolder()
 }
 juce::File userLayerPresetFolder() { auto f = userDataFolder().getChildFile ("Layer Presets"); f.createDirectory(); return f; }
 juce::File userCharacterFolder()   { auto f = userDataFolder().getChildFile ("Characters");    f.createDirectory(); return f; }
+
+juce::File soundLibraryFolder()
+{
+    auto f = userDataFolder().getChildFile ("Sound Library");
+    if (! f.isDirectory())
+    {
+        for (auto* sub : { "Creature/Growls", "Creature/Roars", "Creature/Snarls & Hisses", "Creature/Breaths & Grunts",
+                           "Supernatural/Whispers", "Supernatural/Drones & Wails",
+                           "Machine/Hums & Servos", "Machine/Glitches",
+                           "Media/Radio Static", "Media/Vinyl & Crackle", "Media/Tape & Hum" })
+            f.getChildFile (sub).createDirectory();
+        f.getChildFile ("READ ME.txt").replaceWithText (
+            "Monster Lab Sound Library\n\n"
+            "Drop your own sound files (WAV, AIFF, FLAC, MP3) into these folders.\n"
+            "They appear in the SAMPLES section of every layer.\n"
+            "You can make any folders you like; these are just a starting point.\n\n"
+            "Modes:\n"
+            "  Bed      - plays the sound underneath your voice while you speak (static, crackle, hum)\n"
+            "  Through  - your voice shapes the sound, so a growl 'speaks' your words\n"
+            "  Granular - tiny scattered fragments of the sound, following your voice\n\n"
+            "Your sounds are never copied into the app or anywhere else.\n");
+    }
+    return f;
+}
+
+juce::File resolveSampleFile (const juce::String& p)
+{
+    if (p.isEmpty()) return {};
+    if (juce::File::isAbsolutePath (p)) return juce::File (p);
+    return soundLibraryFolder().getChildFile (p);
+}
 } // namespace ml

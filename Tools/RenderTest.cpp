@@ -79,6 +79,39 @@ int main (int argc, char** argv)
         check (juce::String ("fx_") + effectTable()[(size_t) e].id, { l }, src, sr, outDir);
     }
 
+    // user sample blending (needs a sound file: argv[3])
+    if (argc >= 4)
+    {
+        auto sample = juce::File::getCurrentWorkingDirectory().getChildFile (argv[3]).getFullPathName();
+        for (int mode = 0; mode < 3; ++mode)
+        {
+            Layer l; l.fx[E_Sample1].on = true; l.fx[E_Sample1].file = sample; l.fx[E_Sample1].p[0] = (float) mode;
+            check (juce::String ("sample_") + sampleModeName (mode), { l }, src, sr, outDir);
+        }
+        auto d = makeBuiltInPreset ("Demon");
+        d.fx[E_Sample1].on = true; d.fx[E_Sample1].file = sample; d.fx[E_Sample1].p[0] = 1; d.fx[E_Sample1].p[1] = 60;
+        check ("STACK Demon + growl Through", { d }, src, sr, outDir);
+        // missing file must be harmless
+        Layer m; m.fx[E_Sample1].on = true; m.fx[E_Sample1].file = "does/not/exist.wav";
+        RenderOutput o; renderStack (src, sr, { m }, o);
+        float diff = 0;
+        for (int i = 0; i < src.getNumSamples(); ++i) diff = juce::jmax (diff, std::abs (o.audio.getSample (0, i) - src.getSample (0, i)));
+        std::printf ("%-5s missing sample file is ignored (max diff %g)\n", diff < 1e-6f ? "OK" : "FAIL", diff);
+        if (diff >= 1e-6f) ++failures;
+    }
+
+    // progress reporting: monotonic and ends at 100%
+    {
+        std::vector<float> seen;
+        RenderOutput o;
+        renderStack (src, sr, { makeBuiltInPreset ("Demon"), makeBuiltInPreset ("Ghost") }, o, nullptr, [&] (float p) { seen.push_back (p); });
+        bool mono = true;
+        for (size_t i = 1; i < seen.size(); ++i) if (seen[i] < seen[i - 1]) mono = false;
+        bool ok = seen.size() > 10 && mono && seen.back() == 1.0f;
+        std::printf ("%-5s progress: %d updates, never goes backwards, ends at 100%%\n", ok ? "OK" : "FAIL", (int) seen.size());
+        if (! ok) ++failures;
+    }
+
     // the target workflow: Demon + VHS stacked; Demon + Ghost + VHS
     check ("STACK Demon + VHS", { makeBuiltInPreset ("Demon"), makeBuiltInPreset ("VHS - Worn Tape") }, src, sr, outDir);
     check ("STACK Demon + Ghost + VHS", { makeBuiltInPreset ("Demon"), makeBuiltInPreset ("Ghost"), makeBuiltInPreset ("VHS - Worn Tape") }, src, sr, outDir);

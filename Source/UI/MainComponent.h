@@ -72,12 +72,18 @@ public:
     void saveLayerPreset (int index);
 
     void openAudioDialog();
-    bool loadAudio (const juce::File&);
+    bool loadAudio (const juce::File&, bool longFileConfirmed = false);
+    void clearAudio();
     void exportDialog();
     void saveCharacterDialog();
     void loadCharacterDialog();
     void showAudioSettings();
     bool writeProcessedWav (const juce::File&);
+    void loadSettings();
+    void saveSettings();
+    juce::String exportDescription() const;
+    bool exportMono() const;
+    int exportFormat = 1, exportBits = 24, exportChannels = 1;   // 1 WAV 2 AIFF 3 FLAC / 16,24,32 / 1 same 2 mono 3 stereo
     void togglePlay();
     void stopPlay();
 
@@ -89,6 +95,7 @@ public:
     juce::String statusText { "Drop a voice recording (WAV) on the right, then click presets on the left." };
     bool renderUpToDate = true, renderLimited = false;
     std::atomic<float> renderProgress { 0 };
+    std::atomic<double> renderStartMs { 0 };
 
 private:
     void timerCallback() override;
@@ -96,6 +103,7 @@ private:
     void requestRender();
     void selfTestStep();
     int selfTestStage = -1;
+    bool progressShot = false;
     juce::File selfTestOut;
 
     std::unique_ptr<MonsterLookAndFeel> lnf;

@@ -9,6 +9,7 @@ struct EffectState
 {
     bool on = false;
     float p[kMaxParams] {};
+    juce::String file;   // Samples section only: path relative to the Sound Library (or absolute)
 };
 
 struct Layer
@@ -17,13 +18,13 @@ struct Layer
     juce::String presetName;           // which preset it started from (informational)
     bool enabled = true;
     float mix = 100.0f;                // wet/dry, 0..100 %
-    bool sectionOn[NumSections] { true, true, true, true, true };
+    bool sectionOn[NumSections];
     std::array<EffectState, NumEffects> fx;
     juce::uint32 seed = 1;             // keeps random textures stable between renders
 
     // The settings the layer started with (preset / loaded file), for the RESET buttons.
     std::array<EffectState, NumEffects> startFx;
-    bool startSectionOn[NumSections] { true, true, true, true, true };
+    bool startSectionOn[NumSections];
     void captureStart()      { startFx = fx; std::copy (sectionOn, sectionOn + NumSections, startSectionOn); }
     void resetSection (int s)
     {
@@ -54,4 +55,6 @@ Layer makeBuiltInPreset (const juce::String& name);
 juce::File userDataFolder();         // ~/Documents/Monster Lab
 juce::File userLayerPresetFolder();  // ~/Documents/Monster Lab/Layer Presets
 juce::File userCharacterFolder();    // ~/Documents/Monster Lab/Characters
+juce::File soundLibraryFolder();     // ~/Documents/Monster Lab/Sound Library (created with starter subfolders)
+juce::File resolveSampleFile (const juce::String& relOrAbs);
 } // namespace ml

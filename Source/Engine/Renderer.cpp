@@ -2,6 +2,8 @@
 #include <rubberband/RubberBandStretcher.h>
 #include <complex>
 #include <cmath>
+#include <map>
+#include <mutex>
 
 namespace ml
 {
@@ -10,6 +12,20 @@ static constexpr double twoPi = juce::MathConstants<double>::twoPi;
 
 static inline float dbToGain (float db) { return std::pow (10.0f, db / 20.0f); }
 static inline bool aborted (const std::atomic<bool>* a) { return a != nullptr && a->load(); }
+
+//==============================================================================
+// Progress: each effect has a rough cost; heavy inner loops report partial progress.
+struct Progress
+{
+    std::function<void (float)> cb;
+    double total = 1, done = 0, curWeight = 0, last = 0;
+    void report (double v) { v = juce::jlimit (0.0, 1.0, v); if (v > last) { last = v; if (cb) cb ((float) v); } }  // never goes backwards
+    void begin (double w) { curWeight = w; }
+    void partial (double frac) { report ((done + curWeight * juce::jlimit (0.0, 1.0, frac)) / total); }
+    void end() { done += curWeight; curWeight = 0; report (done / total); }
+};
+static thread_local Progress* gProg = nullptr;
+static inline void progPartial (double f) { if (gProg) gProg->partial (f); }
 
 //==============================================================================
 // Small DSP building blocks
@@ -187,6 +203,7 @@ static Buf rubberBand (const Buf& in, double sr, double pitchScale, double forma
     for (int pos = 0; pos < n; pos += block)
     {
         if (aborted (abort)) return in;
+        progPartial (0.15 + 0.85 * pos / (double) juce::jmax (1, n));
         int len = juce::jmin (block, n - pos);
         const float* ptrs[2] = { in.getReadPointer (0, pos), in.getReadPointer (1, pos) };
         s.process (ptrs, (size_t) len, pos + len >= n);
@@ -212,8 +229,10 @@ static void stft (const float* x, float* y, int n, int order, int hop, BinFn fn)
     for (int i = 0; i < N; ++i) win[(size_t) i] = 0.5f - 0.5f * std::cos ((float) twoPi * i / N);
 
     std::vector<float> acc ((size_t) (n + N), 0.0f), norm ((size_t) (n + N), 0.0f);
+    int frame = 0;
     for (int pos = -N + hop; pos < n; pos += hop)
     {
+        if ((++frame & 63) == 0) progPartial ((pos + N) / (double) (n + N));
         for (int i = 0; i < N; ++i)
         {
             int k = pos + i;
@@ -907,82 +926,365 @@ static void crackle (Buf& b, double sr, float density, float levelDb, int conten
         b.addSample (1, i, (c * 0.8f + surface) * g);
     }
 }
+// VHS-style tape warp: random events where the tape briefly drags (pitch sags),
+// then snaps back (short upward chirp) so timing stays in sync. Optional muffle/level dip.
+static void tapeWarp (Buf& b, double sr, float freq, float depth, float lengthSec, juce::uint32 seed)
+{
+    const int n = b.getNumSamples();
+    if (freq <= 0.0f || depth <= 0.0f) return;
+    juce::Random r ((juce::int64) seed);
+    std::vector<float> del ((size_t) n, 0.0f), env ((size_t) n, 0.0f);
+    const double eventsPerSec = freq / 100.0 * 0.9;
+    double t = r.nextDouble() / eventsPerSec;
+    while (true)
+    {
+        const int start = (int) (t * sr);
+        if (start >= n) break;
+        const double len = lengthSec * (0.6 + 0.8 * r.nextDouble());
+        const double semis = depth / 100.0 * 3.0 * (0.5 + 0.5 * r.nextDouble());   // up to 3 st sag
+        const double drop = 1.0 - std::pow (2.0, -semis / 12.0);
+        const int L = juce::jmax (8, (int) (len * sr));
+        const int rise = (int) (L * 0.78);                                            // slow drag ...
+        const double D = drop * rise;                                                 // samples of lag at the bottom
+        for (int i = 0; i < L && start + i < n; ++i)
+        {
+            double x = i < rise ? (double) i / rise : 1.0 - (double) (i - rise) / (L - rise);   // ... quick snap back
+            double sm = 0.5 - 0.5 * std::cos (x * juce::MathConstants<double>::pi);
+            auto k = (size_t) (start + i);
+            del[k] = juce::jmax (del[k], (float) (D * sm));
+            env[k] = juce::jmax (env[k], (float) sm);
+        }
+        t += len + (-std::log (juce::jmax (1.0e-6, r.nextDouble())) / eventsPerSec);
+    }
+    modulatedRead (b, [&] (int i, int) { return del[(size_t) i] + 1.0f; });
+
+    // muffle + slight level dip that follows each warp (scaled with depth)
+    const float muffle = juce::jlimit (0.0f, 1.0f, depth / 100.0f);
+    auto lp = Biquad::lp (sr, 1400);
+    for (int i = 0; i < n; ++i)
+    {
+        const float e = env[(size_t) i] * muffle;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float x = b.getSample (ch, i);
+            float dull = lp.tick (x, ch);
+            b.setSample (ch, i, (x + (dull - x) * 0.8f * e) * (1.0f - 0.3f * e));
+        }
+    }
+}
+
+//------------------------------------------------------------------ user samples
+struct LoadedSample { juce::Time modified; double rate = 0; juce::AudioBuffer<float> audio; };
+
+// Loads (and caches) a user sound as stereo at `sr`, pitch-shifted by varispeed.
+static std::shared_ptr<const juce::AudioBuffer<float>> loadSample (const juce::File& f, double sr, float pitchSt)
+{
+    static std::mutex m;
+    static std::map<juce::String, std::shared_ptr<LoadedSample>> raw;
+    static std::map<juce::String, std::shared_ptr<juce::AudioBuffer<float>>> converted;
+    if (! f.existsAsFile()) return nullptr;
+
+    std::lock_guard<std::mutex> lock (m);
+    const auto path = f.getFullPathName();
+    auto& entry = raw[path];
+    if (entry == nullptr || entry->modified != f.getLastModificationTime())
+    {
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (f));
+        if (rd == nullptr || rd->lengthInSamples < 64) { raw.erase (path); return nullptr; }
+        auto ls = std::make_shared<LoadedSample>();
+        const int len = (int) std::min (rd->lengthInSamples, (juce::int64) (rd->sampleRate * 600));   // 10 min cap
+        ls->audio.setSize (2, len);
+        rd->read (&ls->audio, 0, len, 0, true, true);
+        if (rd->numChannels == 1) ls->audio.copyFrom (1, 0, ls->audio, 0, 0, len);
+        ls->rate = rd->sampleRate;
+        ls->modified = f.getLastModificationTime();
+        entry = ls;
+        for (auto it = converted.begin(); it != converted.end();)
+            it = it->first.startsWith (path + "|") ? converted.erase (it) : std::next (it);
+    }
+
+    const auto key = path + "|" + juce::String (sr) + "|" + juce::String (pitchSt, 1);
+    if (auto it = converted.find (key); it != converted.end()) return it->second;
+
+    const double ratio = entry->rate / sr * std::pow (2.0, pitchSt / 12.0);   // source samples per output sample
+    const int n = entry->audio.getNumSamples();
+    const int m2 = juce::jmax (1, (int) (n / ratio));
+    auto out = std::make_shared<juce::AudioBuffer<float>> (2, m2);
+    Buf src (entry->audio);
+    if (ratio > 1.0) { auto a = Biquad::lp (entry->rate, entry->rate * 0.45 / ratio), c = a; a.run (src); c.run (src); }
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < m2; ++i)
+            out->setSample (ch, i, readCubic (src.getReadPointer (ch), n, i * ratio));
+    if (converted.size() > 24) converted.clear();
+    converted[key] = out;
+    return out;
+}
+
+// Smoothed "is the voice speaking" gate (0..1) from the layer input.
+static std::vector<float> voiceGate (const Buf& b, double sr, float releaseMs)
+{
+    std::vector<float> env;
+    envelope (b, env, sr, 8, releaseMs);
+    float peak = 1.0e-6f;
+    for (auto e : env) peak = juce::jmax (peak, e);
+    for (auto& e : env) e = juce::jlimit (0.0f, 1.0f, (e / peak - 0.03f) * 4.0f);
+    return env;
+}
+
+static float activeRms (const Buf& b, const std::vector<float>& gate)
+{
+    double s = 0, c = 0;
+    for (int i = 0; i < b.getNumSamples(); ++i)
+        if (gate[(size_t) i] > 0.5f)
+        {
+            float x = 0.5f * (b.getSample (0, i) + b.getSample (1, i));
+            s += (double) x * x; c += 1;
+        }
+    return c > 0 ? (float) std::sqrt (s / c) : rms (b);
+}
+
+static void sampleBlend (Buf& b, double sr, const juce::String& file, int mode, float amount, float pitchSt,
+                         juce::uint32 seed)
+{
+    auto smp = loadSample (resolveSampleFile (file), sr, pitchSt);
+    if (smp == nullptr || amount <= 0.0f) return;
+    const int n = b.getNumSamples(), sn = smp->getNumSamples();
+    const float a = amount / 100.0f;
+    Buf wet (2, n);
+    wet.clear();
+
+    if (mode == 0)   // ---------------- BED: loop the sound under the voice, following when it speaks
+    {
+        auto gate = voiceGate (b, sr, 450.0f);
+        juce::Random r ((juce::int64) seed);
+        int offset = sn > 1 ? r.nextInt (sn) : 0;
+        const int xf = juce::jmin (sn / 4, (int) (0.05 * sr));   // loop crossfade
+        for (int i = 0; i < n; ++i)
+        {
+            int k = (i + offset) % sn;
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                float x = smp->getSample (ch, k);
+                if (xf > 0 && k >= sn - xf)   // blend the loop end into its start
+                {
+                    float w = (float) (k - (sn - xf)) / (float) xf;
+                    x = x * (1.0f - w) + smp->getSample (ch, k - (sn - xf)) * w;
+                }
+                wet.setSample (ch, i, x * gate[(size_t) i]);
+            }
+        }
+        const float vr = activeRms (b, gate), sr2 = juce::jmax (1.0e-6f, rms (wet));
+        mixInto (b, wet, 1.0f, a * 0.6f * vr / sr2);
+        return;
+    }
+
+    if (mode == 1)   // ---------------- THROUGH: cross-synthesis — the sound, shaped by the voice's spectrum
+    {
+        const int order = fftOrderFor (sr, 11), N = 1 << order, hop = N / 4, nb = N / 2 + 1;
+        juce::dsp::FFT fft (order);
+        std::vector<float> win ((size_t) N), vbuf ((size_t) N * 2), sbuf ((size_t) N * 2), venv ((size_t) nb), senv ((size_t) nb), pref ((size_t) nb + 1);
+        for (int i = 0; i < N; ++i) win[(size_t) i] = 0.5f - 0.5f * std::cos ((float) twoPi * i / N);
+
+        // spectral envelope: magnitude smoothed over a frequency-dependent number of bins
+        auto smoothEnv = [&] (const std::complex<float>* bins, std::vector<float>& envOut)
+        {
+            pref[0] = 0;
+            for (int k = 0; k < nb; ++k) pref[(size_t) k + 1] = pref[(size_t) k] + std::abs (bins[k]);
+            for (int k = 0; k < nb; ++k)
+            {
+                int w = 2 + k / 12;
+                int lo = juce::jmax (0, k - w), hi = juce::jmin (nb, k + w + 1);
+                envOut[(size_t) k] = (pref[(size_t) hi] - pref[(size_t) lo]) / (float) (hi - lo);
+            }
+        };
+
+        std::vector<float> voice ((size_t) n);
+        for (int i = 0; i < n; ++i) voice[(size_t) i] = 0.5f * (b.getSample (0, i) + b.getSample (1, i));
+        std::vector<float> acc ((size_t) (2 * (n + N)), 0.0f), norm ((size_t) (n + N), 0.0f);
+        juce::Random r ((juce::int64) seed);
+        int sPos = sn > N ? r.nextInt (sn - N) : 0;
+        int frame = 0;
+
+        for (int pos = -N + hop; pos < n; pos += hop)
+        {
+            if ((++frame & 31) == 0) progPartial ((pos + N) / (double) (n + N));
+            for (int i = 0; i < N; ++i) { int k = pos + i; vbuf[(size_t) i] = (k >= 0 && k < n) ? voice[(size_t) k] * win[(size_t) i] : 0.0f; }
+            std::fill (vbuf.begin() + N, vbuf.end(), 0.0f);
+            fft.performRealOnlyForwardTransform (vbuf.data(), true);
+            auto* vb = reinterpret_cast<std::complex<float>*> (vbuf.data());
+            smoothEnv (vb, venv);
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                for (int i = 0; i < N; ++i) sbuf[(size_t) i] = smp->getSample (ch, (sPos + i) % sn) * win[(size_t) i];
+                std::fill (sbuf.begin() + N, sbuf.end(), 0.0f);
+                fft.performRealOnlyForwardTransform (sbuf.data(), true);
+                auto* sb = reinterpret_cast<std::complex<float>*> (sbuf.data());
+                smoothEnv (sb, senv);
+                for (int k = 0; k < nb; ++k)
+                    sb[k] *= venv[(size_t) k] / juce::jmax (1.0e-4f, senv[(size_t) k]);
+                fft.performRealOnlyInverseTransform (sbuf.data());
+                for (int i = 0; i < N; ++i)
+                {
+                    int k = pos + i;
+                    if (k >= 0 && k < n) acc[(size_t) (ch * (n + N) + k)] += sbuf[(size_t) i] * win[(size_t) i];
+                }
+            }
+            for (int i = 0; i < N; ++i) { int k = pos + i; if (k >= 0 && k < n) norm[(size_t) k] += win[(size_t) i] * win[(size_t) i]; }
+            sPos = (sPos + hop) % sn;
+        }
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < n; ++i)
+                wet.setSample (ch, i, norm[(size_t) i] > 1e-3f ? acc[(size_t) (ch * (n + N) + i)] / norm[(size_t) i] : 0.0f);
+
+        const float vr = rms (b), wr = juce::jmax (1.0e-6f, rms (wet));
+        mixInto (b, wet, 1.0f - 0.75f * a, a * vr / wr);
+        return;
+    }
+
+    // ---------------- GRANULAR: short windowed fragments, density and level following the voice
+    auto gate = voiceGate (b, sr, 120.0f);
+    std::vector<float> env;
+    envelope (b, env, sr, 5, 120);
+    float peak = 1.0e-6f;
+    for (auto e : env) peak = juce::jmax (peak, e);
+    juce::Random r ((juce::int64) seed);
+    double t = 0;
+    while (true)
+    {
+        const double density = 12.0 + 50.0 * a;                        // grains per second at full voice
+        t += -std::log (juce::jmax (1.0e-6, r.nextDouble())) / density;
+        const int start = (int) (t * sr);
+        if (start >= n) break;
+        const float g = gate[(size_t) start];
+        if (g < 0.05f) continue;
+        const int glen = (int) ((0.03 + 0.09 * r.nextDouble()) * sr);
+        if (glen >= sn) continue;
+        const int src = r.nextInt (juce::jmax (1, sn - glen));
+        const float pan = r.nextFloat() * 2 - 1;
+        const float gl = std::sqrt (0.5f * (1 - pan)), gr = std::sqrt (0.5f * (1 + pan));
+        const float lvl = env[(size_t) start] / peak;
+        for (int i = 0; i < glen && start + i < n; ++i)
+        {
+            float w = 0.5f - 0.5f * std::cos ((float) twoPi * i / glen) ;
+            float x = 0.5f * (smp->getSample (0, src + i) + smp->getSample (1, src + i)) * w * lvl;
+            wet.addSample (0, start + i, x * gl);
+            wet.addSample (1, start + i, x * gr);
+        }
+    }
+    const float vr = activeRms (b, gate), wr = juce::jmax (1.0e-6f, rms (wet));
+    mixInto (b, wet, 1.0f, a * vr / wr * 0.5f);
+}
 } // namespace fx
 
 //==============================================================================
+static bool voicePassActive (const Layer& L)
+{
+    return (L.isActive (E_Pitch) && std::abs (L.v (E_Pitch, 0)) > 0.01f)
+        || (L.isActive (E_Formant) && std::abs (L.v (E_Formant, 0)) > 0.01f)
+        || (L.isActive (E_Size) && std::abs (L.v (E_Size, 0)) > 0.5f);
+}
+
+static bool effectRuns (const Layer& L, int e)
+{
+    if (e == E_Pitch) return voicePassActive (L);
+    if (e == E_Formant) return false;   // folded into the pitch pass
+    if (isSampleEffect (e)) return L.isActive (e) && L.fx[(size_t) e].file.isNotEmpty();
+    return L.isActive (e);
+}
+
+// Rough relative CPU cost of each effect, used only for the progress bar / time estimate.
+static double effectCost (const Layer& L, int e)
+{
+    if (! effectRuns (L, e)) return 0.0;
+    switch (e)
+    {
+        case E_Pitch:     return 6.0;
+        case E_Voices:    return 2.0 * L.v (E_Voices, 0) + 1.0;
+        case E_Subharm:   return 2.5;
+        case E_Shimmer:   return 5.0;
+        case E_Breath: case E_Robot: case E_Freeze: return 2.0;
+        case E_Reverb: case E_RevReverb: return 1.2;
+        case E_Instability: case E_Wow: case E_Flutter: case E_Warp: case E_Speed: return 0.8;
+        case E_Sample1: case E_Sample2:
+            return L.v (e, 0) > 0.5f && L.v (e, 0) < 1.5f ? 4.0 : 0.8;
+        default:          return 0.3;
+    }
+}
+
+static double layerCost (const Layer& L)
+{
+    if (! L.enabled) return 0.0;
+    double c = 0.3;
+    for (int e = 0; e < NumEffects; ++e) c += effectCost (L, e);
+    return c;
+}
+
 void processLayer (const Layer& L, Buf& b, double sr, int& preRoll, const std::atomic<bool>* abort)
 {
-    auto on = [&L] (int e) { return L.isActive (e); };
+    auto on = [&L] (int e) { return effectRuns (L, e); };
     auto v  = [&L] (int e, int i) { return L.v (e, i); };
     auto seed = [&L] (int e) { return L.seed * 2654435761u + (juce::uint32) e * 97u; };
-#define ML_CHECK if (aborted (abort)) return;
+
+#define ML_RUN(E, ...) \
+    if (on (E)) { if (gProg) gProg->begin (effectCost (L, E)); __VA_ARGS__; if (gProg) gProg->end(); if (aborted (abort)) return; }
 
     // ---------------- VOICE: one high-quality Rubber Band pass for pitch + formant + size
-    {
-        double pitchSt = 0, formantSt = 0;
-        float size = on (E_Size) ? v (E_Size, 0) / 100.0f : 0.0f;
-        if (on (E_Pitch))   pitchSt += v (E_Pitch, 0);
-        if (on (E_Formant)) formantSt += v (E_Formant, 0);
-        pitchSt   += -size * 4.0;
-        formantSt += -size * 7.0;
-        if (std::abs (pitchSt) > 0.01 || std::abs (formantSt) > 0.01)
-        {
-            double P = std::pow (2.0, pitchSt / 12.0), F = std::pow (2.0, formantSt / 12.0);
-            b = rubberBand (b, sr, P, F / P, true, false, abort);
-        }
-        ML_CHECK
-        if (on (E_Size))   fx::sizeResonance (b, sr, size);
-        if (on (E_Bass))   fx::bass (b, sr, v (E_Bass, 0), v (E_Bass, 1));
-        if (on (E_Voices)) fx::voices (b, sr, (int) v (E_Voices, 0), v (E_Voices, 1), v (E_Voices, 2) / 100.0f, seed (E_Voices), abort);
-        ML_CHECK
-    }
+    const float size = L.isActive (E_Size) ? v (E_Size, 0) / 100.0f : 0.0f;
+    ML_RUN (E_Pitch, {
+        double pitchSt = (L.isActive (E_Pitch) ? v (E_Pitch, 0) : 0.0) - size * 4.0;
+        double formantSt = (L.isActive (E_Formant) ? v (E_Formant, 0) : 0.0) - size * 7.0;
+        double P = std::pow (2.0, pitchSt / 12.0), F = std::pow (2.0, formantSt / 12.0);
+        b = rubberBand (b, sr, P, F / P, true, false, abort);
+    })
+    if (L.isActive (E_Size)) fx::sizeResonance (b, sr, size);
+    ML_RUN (E_Bass,   fx::bass (b, sr, v (E_Bass, 0), v (E_Bass, 1)))
+    ML_RUN (E_Voices, fx::voices (b, sr, (int) v (E_Voices, 0), v (E_Voices, 1), v (E_Voices, 2) / 100.0f, seed (E_Voices), abort))
     // ---------------- TEXTURE
-    if (on (E_Grit))        fx::grit (b, sr, v (E_Grit, 0), seed (E_Grit));
-    if (on (E_Growl))       fx::growl (b, sr, v (E_Growl, 0), v (E_Growl, 1), seed (E_Growl));
-    ML_CHECK
-    if (on (E_Breath))      fx::breath (b, sr, v (E_Breath, 0), seed (E_Breath));
-    ML_CHECK
-    if (on (E_Distortion))  fx::distortion (b, sr, v (E_Distortion, 0), v (E_Distortion, 1));
-    if (on (E_Instability)) fx::instability (b, sr, v (E_Instability, 0), v (E_Instability, 1), seed (E_Instability));
-    ML_CHECK
-    if (on (E_Subharm))     fx::subharmonics (b, sr, v (E_Subharm, 0), (int) v (E_Subharm, 1), abort);
-    ML_CHECK
+    ML_RUN (E_Grit,        fx::grit (b, sr, v (E_Grit, 0), seed (E_Grit)))
+    ML_RUN (E_Growl,       fx::growl (b, sr, v (E_Growl, 0), v (E_Growl, 1), seed (E_Growl)))
+    ML_RUN (E_Breath,      fx::breath (b, sr, v (E_Breath, 0), seed (E_Breath)))
+    ML_RUN (E_Distortion,  fx::distortion (b, sr, v (E_Distortion, 0), v (E_Distortion, 1)))
+    ML_RUN (E_Instability, fx::instability (b, sr, v (E_Instability, 0), v (E_Instability, 1), seed (E_Instability)))
+    ML_RUN (E_Subharm,     fx::subharmonics (b, sr, v (E_Subharm, 0), (int) v (E_Subharm, 1), abort))
+    // ---------------- SAMPLES (user sounds; after texture so creature sounds sit inside the voice,
+    //                  before sci-fi/space/media so they get the same room and tape treatment)
+    ML_RUN (E_Sample1, fx::sampleBlend (b, sr, L.fx[E_Sample1].file, (int) std::round (v (E_Sample1, 0)), v (E_Sample1, 1), v (E_Sample1, 2), seed (E_Sample1)))
+    ML_RUN (E_Sample2, fx::sampleBlend (b, sr, L.fx[E_Sample2].file, (int) std::round (v (E_Sample2, 0)), v (E_Sample2, 1), v (E_Sample2, 2), seed (E_Sample2)))
     // ---------------- SCI-FI
-    if (on (E_Robot))     fx::robot (b, sr, v (E_Robot, 0), v (E_Robot, 1));
-    ML_CHECK
-    if (on (E_RingMod))   fx::ringMod (b, sr, v (E_RingMod, 0), v (E_RingMod, 1));
-    if (on (E_FreqShift)) fx::freqShift (b, sr, v (E_FreqShift, 0), v (E_FreqShift, 1));
-    if (on (E_Bitcrush))  fx::bitcrush (b, sr, v (E_Bitcrush, 0), v (E_Bitcrush, 1), v (E_Bitcrush, 2));
-    if (on (E_Flanger))   fx::flanger (b, sr, v (E_Flanger, 0), v (E_Flanger, 1), v (E_Flanger, 2));
-    if (on (E_Chorus))    fx::chorus (b, sr, v (E_Chorus, 0), v (E_Chorus, 1), v (E_Chorus, 2));
-    ML_CHECK
+    ML_RUN (E_Robot,     fx::robot (b, sr, v (E_Robot, 0), v (E_Robot, 1)))
+    ML_RUN (E_RingMod,   fx::ringMod (b, sr, v (E_RingMod, 0), v (E_RingMod, 1)))
+    ML_RUN (E_FreqShift, fx::freqShift (b, sr, v (E_FreqShift, 0), v (E_FreqShift, 1)))
+    ML_RUN (E_Bitcrush,  fx::bitcrush (b, sr, v (E_Bitcrush, 0), v (E_Bitcrush, 1), v (E_Bitcrush, 2)))
+    ML_RUN (E_Flanger,   fx::flanger (b, sr, v (E_Flanger, 0), v (E_Flanger, 1), v (E_Flanger, 2)))
+    ML_RUN (E_Chorus,    fx::chorus (b, sr, v (E_Chorus, 0), v (E_Chorus, 1), v (E_Chorus, 2)))
     // ---------------- SPACE
-    if (on (E_Freeze))    fx::spectralFreeze (b, sr, v (E_Freeze, 0), v (E_Freeze, 1), seed (E_Freeze));
-    ML_CHECK
-    if (on (E_Shimmer))   fx::shimmer (b, sr, v (E_Shimmer, 0), v (E_Shimmer, 1), v (E_Shimmer, 2), abort);
-    ML_CHECK
-    if (on (E_RevReverb)) fx::reverseReverb (b, sr, v (E_RevReverb, 0), v (E_RevReverb, 1));
-    if (on (E_Reverb))    fx::reverb (b, sr, v (E_Reverb, 0), v (E_Reverb, 1), v (E_Reverb, 2));
-    if (on (E_Echo))      fx::echo (b, sr, v (E_Echo, 0), v (E_Echo, 1), v (E_Echo, 2));
-    if (on (E_Delay))     fx::pingPong (b, sr, v (E_Delay, 0), v (E_Delay, 1), v (E_Delay, 2));
-    if (on (E_Stereo))    fx::stereoMove (b, sr, v (E_Stereo, 0), v (E_Stereo, 1));
-    ML_CHECK
+    ML_RUN (E_Freeze,    fx::spectralFreeze (b, sr, v (E_Freeze, 0), v (E_Freeze, 1), seed (E_Freeze)))
+    ML_RUN (E_Shimmer,   fx::shimmer (b, sr, v (E_Shimmer, 0), v (E_Shimmer, 1), v (E_Shimmer, 2), abort))
+    ML_RUN (E_RevReverb, fx::reverseReverb (b, sr, v (E_RevReverb, 0), v (E_RevReverb, 1)))
+    ML_RUN (E_Reverb,    fx::reverb (b, sr, v (E_Reverb, 0), v (E_Reverb, 1), v (E_Reverb, 2)))
+    ML_RUN (E_Echo,      fx::echo (b, sr, v (E_Echo, 0), v (E_Echo, 1), v (E_Echo, 2)))
+    ML_RUN (E_Delay,     fx::pingPong (b, sr, v (E_Delay, 0), v (E_Delay, 1), v (E_Delay, 2)))
+    ML_RUN (E_Stereo,    fx::stereoMove (b, sr, v (E_Stereo, 0), v (E_Stereo, 1)))
     // ---------------- MEDIA
-    if (on (E_Speed))     fx::speed (b, sr, preRoll, v (E_Speed, 0));
-    if (on (E_Wow))       fx::wowFlutter (b, sr, v (E_Wow, 0), v (E_Wow, 1), false, seed (E_Wow));
-    if (on (E_Flutter))   fx::wowFlutter (b, sr, v (E_Flutter, 0), v (E_Flutter, 1), true, seed (E_Flutter));
-    if (on (E_TapeSat))   fx::tapeSat (b, sr, v (E_TapeSat, 0));
-    if (on (E_Resonance)) fx::resonance (b, sr, (int) std::round (v (E_Resonance, 0)), v (E_Resonance, 1));
-    if (on (E_Bandwidth)) fx::bandwidth (b, sr, v (E_Bandwidth, 0), v (E_Bandwidth, 1));
-    if (on (E_Compress))  fx::compress (b, sr, v (E_Compress, 0));
-    if (on (E_Dropouts))  fx::dropouts (b, sr, v (E_Dropouts, 0), v (E_Dropouts, 1), seed (E_Dropouts));
+    ML_RUN (E_Speed,     fx::speed (b, sr, preRoll, v (E_Speed, 0)))
+    ML_RUN (E_Wow,       fx::wowFlutter (b, sr, v (E_Wow, 0), v (E_Wow, 1), false, seed (E_Wow)))
+    ML_RUN (E_Flutter,   fx::wowFlutter (b, sr, v (E_Flutter, 0), v (E_Flutter, 1), true, seed (E_Flutter)))
+    ML_RUN (E_Warp,      fx::tapeWarp (b, sr, v (E_Warp, 0), v (E_Warp, 1), v (E_Warp, 2), seed (E_Warp)))
+    ML_RUN (E_TapeSat,   fx::tapeSat (b, sr, v (E_TapeSat, 0)))
+    ML_RUN (E_Resonance, fx::resonance (b, sr, (int) std::round (v (E_Resonance, 0)), v (E_Resonance, 1)))
+    ML_RUN (E_Bandwidth, fx::bandwidth (b, sr, v (E_Bandwidth, 0), v (E_Bandwidth, 1)))
+    ML_RUN (E_Compress,  fx::compress (b, sr, v (E_Compress, 0)))
+    ML_RUN (E_Dropouts,  fx::dropouts (b, sr, v (E_Dropouts, 0), v (E_Dropouts, 1), seed (E_Dropouts)))
     if (on (E_Hiss) || on (E_Crackle))
     {
         const int contentEnd = lastAbove (b, 0.0003f) + (int) (0.4 * sr);
-        if (on (E_Hiss))    fx::hiss (b, sr, v (E_Hiss, 0), contentEnd, seed (E_Hiss));
-        if (on (E_Crackle)) fx::crackle (b, sr, v (E_Crackle, 0), v (E_Crackle, 1), contentEnd, seed (E_Crackle));
+        ML_RUN (E_Hiss,    fx::hiss (b, sr, v (E_Hiss, 0), contentEnd, seed (E_Hiss)))
+        ML_RUN (E_Crackle, fx::crackle (b, sr, v (E_Crackle, 0), v (E_Crackle, 1), contentEnd, seed (E_Crackle)))
     }
-#undef ML_CHECK
+#undef ML_RUN
 }
 
 //==============================================================================
@@ -1002,13 +1304,13 @@ static void layerNeeds (const Layer& L, double inputSeconds, double& pre, double
 }
 
 // Run one layer (padding, processing, loudness match, wet/dry) on b in place.
-static bool applyLayer (const Layer& L, Buf& b, double sr, int& preRoll, const std::atomic<bool>* abort)
+static bool applyLayer (const Layer& L, Buf& b, double sr, int& preRoll, int srcLen, const std::atomic<bool>* abort)
 {
     if (! L.enabled) return true;
 
-    // trim silence left by previous layers, then add what this layer needs
+    // trim silent tail left by previous layers (never shorter than the original), then add what this layer needs
     int last = lastAbove (b, 0.00005f);
-    int keep = juce::jlimit (juce::jmin (b.getNumSamples(), preRoll + 1), b.getNumSamples(), last + (int) (0.1 * sr));
+    int keep = juce::jlimit (juce::jmin (b.getNumSamples(), preRoll + srcLen), b.getNumSamples(), last + (int) (0.1 * sr));
     b.setSize (2, keep, true, true);
 
     double pre, tail;
@@ -1096,12 +1398,22 @@ bool StackRenderer::render (const Buf& src, double sr, const Stack& stack, Rende
     if (reuse > 0) { b = cache[reuse - 1].audio; preRoll = cache[reuse - 1].preRoll; }
     else            b = toStereo (src);
 
+    Progress prog;
+    prog.cb = progress;
+    prog.total = 0.2;   // finishing touches
+    for (size_t i = reuse; i < stack.size(); ++i) prog.total += layerCost (stack[i]);
+    struct Scope { Scope (Progress* p) { gProg = p; } ~Scope() { gProg = nullptr; } } scope (&prog);
+    prog.report (0.001);
+
+    // Very long files: don't keep a copy per layer (it would use gigabytes of memory).
+    const bool keepCache = (double) b.getNumSamples() * 2 * sizeof (float) < 600.0e6;
+
     for (size_t i = reuse; i < stack.size(); ++i)
     {
         if (aborted (abort)) return false;
-        if (progress) progress ((float) i / (float) juce::jmax ((size_t) 1, stack.size()));
-        if (! applyLayer (stack[i], b, sr, preRoll, abort)) return false;
-        cache.push_back ({ keys[i], b, preRoll });
+        if (! applyLayer (stack[i], b, sr, preRoll, src.getNumSamples(), abort)) return false;
+        if (stack[i].enabled) { prog.done += 0.3; prog.report (prog.done / prog.total); }
+        if (keepCache) cache.push_back ({ keys[i], b, preRoll });
     }
 
     finalise (std::move (b), preRoll, sr, src.getNumSamples(), out);

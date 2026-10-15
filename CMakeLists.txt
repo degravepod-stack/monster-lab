@@ -4,7 +4,7 @@ if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 endif()
 
-project(MonsterLab VERSION 0.3.0 LANGUAGES C CXX)
+project(MonsterLab VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -40,7 +40,7 @@ juce_add_gui_app(MonsterLab
     PRODUCT_NAME "Monster Lab"
     COMPANY_NAME "DeGrave Brothers"
     BUNDLE_ID "com.degrave.monsterlab"
-    VERSION 0.3.0
+    VERSION 0.4.0
     MICROPHONE_PERMISSION_ENABLED FALSE)
 
 juce_generate_juce_header(MonsterLab)

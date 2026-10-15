@@ -7,11 +7,11 @@
 
 namespace ml
 {
-enum Section { Voice = 0, Texture, SciFi, Space, Media, NumSections };
+enum Section { Voice = 0, Texture, SciFi, Space, Media, Samples, NumSections };
 
 inline const char* sectionName (int s)
 {
-    static const char* n[] = { "VOICE", "TEXTURE", "SCI-FI", "SPACE", "MEDIA" };
+    static const char* n[] = { "VOICE", "TEXTURE", "SCI-FI", "SPACE", "MEDIA", "SAMPLES" };
     return n[s];
 }
 
@@ -47,10 +47,20 @@ enum EffectId
     // Space
     E_Freeze, E_Shimmer, E_RevReverb, E_Reverb, E_Echo, E_Delay, E_Stereo,
     // Media
-    E_Speed, E_Wow, E_Flutter, E_TapeSat, E_Resonance, E_Bandwidth, E_Compress,
+    E_Speed, E_Wow, E_Flutter, E_Warp, E_TapeSat, E_Resonance, E_Bandwidth, E_Compress,
     E_Dropouts, E_Hiss, E_Crackle,
+    // Samples (user sound files)
+    E_Sample1, E_Sample2,
     NumEffects
 };
+
+// Sample modes (Samples > Sample "Mode" param)
+inline const char* sampleModeName (int m)
+{
+    static const char* n[] = { "Bed", "Through", "Granular" };
+    return n[m < 0 ? 0 : (m > 2 ? 2 : m)];
+}
+inline bool isSampleEffect (int e) { return e == E_Sample1 || e == E_Sample2; }
 
 // Resonance types (Media > Resonance "Type" param)
 inline const char* resonanceTypeName (int t)
@@ -94,13 +104,17 @@ inline const std::array<EffectSpec, NumEffects>& effectTable()
         { "speed",   "Playback Speed", Media,   {{ "Speed", 50, 200, 90, 1, "%", 100 }} },
         { "wow",     "Wow",            Media,   {{ "Depth", 0, 100, 30, 1, "%" }, { "Rate", 0.1f, 3, 0.6f, 0.01f, "Hz" }} },
         { "flutter", "Flutter",        Media,   {{ "Depth", 0, 100, 25, 1, "%" }, { "Rate", 4, 25, 9, 0.1f, "Hz" }} },
+        { "warp",    "Tape Warp",      Media,   {{ "Frequency", 0, 100, 30, 1, "%" }, { "Depth", 0, 100, 40, 1, "%" }, { "Length", 0.1f, 2, 0.5f, 0.01f, "s" }} },
         { "tapesat", "Tape Saturation",Media,   {{ "Drive", 0, 100, 40, 1, "%" }} },
         { "reson",   "Resonance",      Media,   {{ "Type", 0, 4, 0, 1, "" }, { "Amount", 0, 100, 80, 1, "%" }} },
         { "band",    "Bandwidth",      Media,   {{ "Low cut", 20, 2000, 300, 1, "Hz", 200 }, { "High cut", 1000, 20000, 3400, 10, "Hz", 5000 }} },
         { "comp",    "Compression",    Media,   {{ "Amount", 0, 100, 50, 1, "%" }} },
         { "dropout", "Dropouts",       Media,   {{ "Frequency", 0, 100, 25, 1, "%" }, { "Depth", 0, 100, 80, 1, "%" }} },
-        { "hiss",    "Hiss",           Media,   {{ "Level", -80, -15, -42, 0.5f, "dB" }} },
-        { "crackle", "Crackle",        Media,   {{ "Density", 0, 100, 30, 1, "%" }, { "Level", -50, -6, -24, 0.5f, "dB" }} },
+        { "hiss",    "Hiss",           Media,   {{ "Level", -100, -40, -76.5f, 0.5f, "dB" }} },
+        { "crackle", "Crackle",        Media,   {{ "Density", 0, 100, 30, 1, "%" }, { "Level", -80, -20, -45, 0.5f, "dB" }} },
+        // ---------------- SAMPLES (sound file chosen per effect, stored separately)
+        { "sample1", "Sample A",       Samples, {{ "Mode", 0, 2, 1, 1, "" }, { "Amount", 0, 100, 50, 1, "%" }, { "Pitch", -24, 24, 0, 0.1f, "st" }} },
+        { "sample2", "Sample B",       Samples, {{ "Mode", 0, 2, 0, 1, "" }, { "Amount", 0, 100, 40, 1, "%" }, { "Pitch", -24, 24, 0, 0.1f, "st" }} },
     }};
     return t;
 }

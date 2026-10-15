@@ -20,6 +20,7 @@ public:
             : DocumentWindow (name, juce::Colour (0xff0b0c0f), DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
+            setName ("DeGrave Brothers' Monster Lab");
             setContentOwned (new ml::MainComponent(), true);
             setResizable (true, true);
             setResizeLimits (1200, 760, 4000, 3000);

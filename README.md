@@ -1,4 +1,4 @@
-# Monster Lab
+# DeGrave Brothers' Monster Lab
 
 Creature, sci-fi and vintage-media voice processor for audio drama. Native Apple Silicon Mac app (JUCE/C++).
 
@@ -31,7 +31,19 @@ After that it opens with a normal double-click.
 - **Center top (the stack):** layers process top to bottom. Each row has an on/off light, a wet/dry blend, move up/down, duplicate, save as preset, and delete. Double-click a name to rename it.
 - **Center bottom:** every effect of the selected layer. Each effect has its own on/off light and each section (Voice, Texture, Sci-Fi, Space, Media) has a master switch. Moving any control switches its effect on. Each section's **RESET** button puts that section back to how the layer started, so experiment freely. Double-click a slider to reset it; click the number to type a value.
 - **A / B:** switch between the original and the processed result while playing. Space bar plays/pauses.
-- **EXPORT 24-BIT WAV** writes a new file next to the original.
+- **EXPORT AS** picks the format (WAV, AIFF, FLAC), bit depth (16, 24, 32-bit float; 32 is WAV only) and mono/stereo ("Same as original" gives mono for a mono recording). **EXPORT** writes a new file next to the original. Your choices are remembered.
+- The **✕** next to the file name removes the audio from the app (your file on disk is untouched). Your layers stay.
+- While processing, the status box shows a progress bar and a time estimate. Files over 20 minutes load after a warning.
+
+### Samples (your own sounds)
+
+On first launch the app makes `Documents/Monster Lab/Sound Library` with starter folders (Creature/Growls, Media/Radio Static, and so on). Drop your own sound files in; any folders work. Each layer's **SAMPLES** section has two slots (Sample A and B). Pick a sound from the menu (it also has *Open Sound Library folder* and *Rescan library*), then a mode:
+
+- **Bed:** loops the sound underneath your voice, only while you're speaking. Good for radio static, crackle and hum.
+- **Through:** cross-synthesis. Your voice's tone shape is imposed on the sound, so a growl "speaks" your words. This is the monster mode.
+- **Granular:** short random fragments of the sound scattered under your voice, following its level. Good for eerie organic texture.
+
+**Amount** sets how much, and **Pitch** shifts the sound before use (and changes its speed, like tape). Your sounds are never copied anywhere; character files only remember which file you picked.
 - **SAVE / LOAD CHARACTER** stores the whole stack as a `.monster` file (`Documents/Monster Lab/Characters`). Saved layer presets live in `Documents/Monster Lab/Layer Presets` and appear under MY LAYER PRESETS.
 
 The app renders the whole recording after each change (usually under a second or two on an M-series Mac; heavy stacks like Ghost or Eldritch take longer). The status light is amber while rendering and teal when ready. Layers above the one you change are reused instead of re-rendered, so tweaking the last layer in the stack is fastest.
@@ -68,18 +80,20 @@ Nothing here is a placeholder. Where an effect is a simpler model than a commerc
 | Stereo Movement | Auto-pan |
 | Playback Speed | Varispeed resample (changes pitch and length, like tape) |
 | Wow / Flutter | Slow and fast modulated delay with random drift |
+| Tape Warp | Random VHS-style drags: pitch sags up to 3 semitones then snaps back (timing stays in sync), with a muffle and level dip that follows each warp |
 | Tape Saturation | Biased soft clipping, head bump, high-frequency loss |
 | Resonance | Telephone, Megaphone, AM Radio, Walkie-Talkie, Gramophone EQ + saturation models |
 | Bandwidth | 24 dB/oct high-pass and low-pass |
 | Compression | Feed-forward peak compressor |
 | Dropouts | Random gain dips |
-| Hiss / Crackle | Shaped noise; random clicks + surface rumble |
+| Hiss / Crackle | Shaped noise; random clicks + surface rumble (defaults −76.5 dB / −45 dB) |
+| Samples: Bed / Through / Granular | Voice-gated loop; STFT cross-synthesis (sound × voice spectral envelope); voice-following granular cloud |
 
 Every layer automatically matches its loudness to the signal coming into it, so stacking doesn't explode. The final output is turned down if it would clip.
 
-## Known limitations (v0.2)
+## Known limitations (v0.4)
 
-- Changes are rendered offline (whole file), not live while dragging. Fine for lines and scenes; slow for very long files (limit 20 minutes).
+- Changes are rendered offline (whole file), not live while dragging. Fine for lines and scenes; long files work but each change can take minutes (the progress bar estimates it).
 - The waveform region-selection idea isn't built yet.
 - No undo yet.
 - ChowTapeModel was not used: it's a full plugin with heavy dependencies. The tape effects here are simpler models.

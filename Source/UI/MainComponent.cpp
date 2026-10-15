@@ -441,6 +441,8 @@ public:
         };
         addAndMakeVisible (toggle);
 
+        if (isSampleEffect (e)) setupFileChooser();
+
         for (int i = 0; i < numParams (e); ++i)
         {
             auto& ps = spec.p[i];
@@ -450,10 +452,11 @@ public:
             pc.label.setColour (juce::Label::textColourId, C::dim);
             addAndMakeVisible (pc.label);
 
-            if (e == E_Resonance && i == 0)
+            if ((e == E_Resonance || isSampleEffect (e)) && i == 0)
             {
                 pc.combo = std::make_unique<juce::ComboBox>();
-                for (int t = 0; t < 5; ++t) pc.combo->addItem (resonanceTypeName (t), t + 1);
+                if (e == E_Resonance) for (int t = 0; t < 5; ++t) pc.combo->addItem (resonanceTypeName (t), t + 1);
+                else                  for (int t = 0; t < 3; ++t) pc.combo->addItem (sampleModeName (t), t + 1);
                 pc.combo->setSelectedId ((int) L->fx[(size_t) e].p[i] + 1, juce::dontSendNotification);
                 pc.combo->onChange = [this, i]
                 {
@@ -492,7 +495,67 @@ public:
         updateEnabledLook();
     }
 
-    static int heightFor (int e) { return 26 + 21 * numParams (e) + 6; }
+    static int heightFor (int e) { return 26 + 21 * numParams (e) + 6 + (isSampleEffect (e) ? 26 : 0); }
+
+    void setupFileChooser()
+    {
+        fileBox = std::make_unique<juce::ComboBox>();
+        fileBox->setTooltip ("Sound from your Sound Library (Documents/Monster Lab/Sound Library)");
+        fileBox->setTextWhenNothingSelected ("Choose a sound...");
+        populateFiles();
+        fileBox->onChange = [this]
+        {
+            const int id = fileBox->getSelectedId();
+            if (id == kOpenFolderId || id == kRescanId)
+            {
+                if (id == kOpenFolderId) soundLibraryFolder().startAsProcess();
+                juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<EffectTile> (this)]
+                                                 { if (auto* t = sp.getComponent()) t->populateFiles(); });
+                return;
+            }
+            if (auto* l = main.selectedLayer())
+            {
+                l->fx[(size_t) e].file = id == kNoneId ? juce::String() : files[(size_t) (id - kFirstFileId)];
+                if (id != kNoneId) autoEnable();
+                main.parametersChanged();
+            }
+        };
+        addAndMakeVisible (*fileBox);
+    }
+
+    void populateFiles()
+    {
+        auto lib = soundLibraryFolder();
+        auto found = lib.findChildFiles (juce::File::findFiles, true, "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+        found.sort();
+        files.clear();
+        fileBox->clear (juce::dontSendNotification);
+        fileBox->addItem ("(none)", kNoneId);
+        juce::String lastFolder = "\x01";
+        const juce::String current = main.selectedLayer() ? main.selectedLayer()->fx[(size_t) e].file : juce::String();
+        int selectId = kNoneId;
+        for (auto& f : found)
+        {
+            auto rel = f.getRelativePathFrom (lib).replaceCharacter ('\\', '/');
+            auto folder = f.getParentDirectory() == lib ? juce::String ("Sound Library") : f.getParentDirectory().getRelativePathFrom (lib).replaceCharacter ('\\', '/');
+            if (folder != lastFolder) { fileBox->addSectionHeading (folder); lastFolder = folder; }
+            const int id = kFirstFileId + (int) files.size();
+            files.push_back (rel);
+            fileBox->addItem (f.getFileNameWithoutExtension(), id);
+            if (rel == current) selectId = id;
+        }
+        if (current.isNotEmpty() && selectId == kNoneId)   // chosen file has gone missing or lives elsewhere
+        {
+            const int id = kFirstFileId + (int) files.size();
+            files.push_back (current);
+            fileBox->addItem ((resolveSampleFile (current).existsAsFile() ? "" : "MISSING: ") + juce::File::createFileWithoutCheckingPath (current).getFileNameWithoutExtension(), id);
+            selectId = id;
+        }
+        fileBox->addSeparator();
+        fileBox->addItem (found.isEmpty() ? "Library is empty - open folder to add sounds..." : "Open Sound Library folder...", kOpenFolderId);
+        fileBox->addItem ("Rescan library", kRescanId);
+        fileBox->setSelectedId (selectId, juce::dontSendNotification);
+    }
 
     void paint (juce::Graphics& g) override
     {
@@ -509,6 +572,7 @@ public:
         auto r = getLocalBounds().reduced (9, 6);
         toggle.setBounds (r.removeFromTop (20));
         r.removeFromTop (2);
+        if (fileBox) { fileBox->setBounds (r.removeFromTop (24).reduced (0, 1)); r.removeFromTop (2); }
         for (int i = 0; i < numParams (e); ++i)
         {
             auto row = r.removeFromTop (21);
@@ -542,8 +606,11 @@ private:
     }
 
     struct ParamControl { juce::Label label; std::unique_ptr<juce::Slider> slider; std::unique_ptr<juce::ComboBox> combo; };
+    static constexpr int kNoneId = 1, kOpenFolderId = 2, kRescanId = 3, kFirstFileId = 100;
     MainComponent& main;
     int e;
+    std::unique_ptr<juce::ComboBox> fileBox;
+    std::vector<juce::String> files;
     juce::ToggleButton toggle;
     ParamControl params[kMaxParams];
 };
@@ -566,11 +633,12 @@ public:
     {
         tiles.clear();
         sections.clear();
+        sectionIds.clear();
         resets.clear();
         auto* L = main.selectedLayer();
         if (L != nullptr)
         {
-            for (int s = 0; s < NumSections; ++s)
+            for (int s : { (int) Voice, (int) Texture, (int) Samples, (int) SciFi, (int) Space, (int) Media })   // processing order
             {
                 auto sec = std::make_unique<juce::ToggleButton> (juce::String (sectionName (s)) + " SECTION");
                 sec->setColour (juce::ToggleButton::tickColourId, C::teal);
@@ -583,6 +651,7 @@ public:
                 };
                 content.addAndMakeVisible (*sec);
                 sections.push_back (std::move (sec));
+                sectionIds.push_back (s);
 
                 auto rs = std::make_unique<juce::TextButton> ("RESET");
                 rs->setTooltip ("Put this section back the way the layer started");
@@ -612,6 +681,12 @@ public:
         repaint();
     }
 
+    void scrollToSection (int sectionId)
+    {
+        for (size_t i = 0; i < sectionIds.size(); ++i)
+            if (sectionIds[i] == sectionId && i < sectionY.size()) viewport.setViewPosition (0, sectionY[i]);
+    }
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (C::panel);
@@ -636,13 +711,15 @@ public:
         const int tw = w / cols;
         int y = 0;
         size_t ti = 0;
+        sectionY.clear();
         for (int s = 0; s < (int) sections.size(); ++s)
         {
+            sectionY.push_back (y);
             sections[(size_t) s]->setBounds (6, y + 6, 200, 22);
             resets[(size_t) s]->setBounds (210, y + 6, 60, 22);
             y += 32;
             int col = 0, rowH = 0;
-            while (ti < tiles.size() && tiles[ti].section == s)
+            while (ti < tiles.size() && tiles[ti].section == sectionIds[(size_t) s])
             {
                 int h = EffectTile::heightFor (tiles[ti].effect);
                 tiles[ti].tile->setBounds (col * tw, y, tw, h);
@@ -663,6 +740,7 @@ private:
     juce::ToggleButton onlyActive;
     std::vector<std::unique_ptr<juce::ToggleButton>> sections;
     std::vector<std::unique_ptr<juce::TextButton>> resets;
+    std::vector<int> sectionIds, sectionY;
     std::vector<TileRef> tiles;
 };
 
@@ -791,7 +869,21 @@ public:
         add (stop,   "STOP",            "Stop and return to the start", [this] { main.stopPlay(); });
         add (aBtn,   "A  ORIGINAL",     "Listen to the untouched original", [this] { setAB (false); });
         add (bBtn,   "B  PROCESSED",    "Listen to the processed result", [this] { setAB (true); });
-        add (exportBtn, "EXPORT 24-BIT WAV", "Write the processed audio as a new 24-bit WAV (original is never changed)", [this] { main.exportDialog(); });
+        add (exportBtn, "EXPORT", "Write the processed audio as a new file (the original is never changed)", [this] { main.exportDialog(); });
+        add (removeBtn, juce::String::fromUTF8 ("\xe2\x9c\x95"), "Remove this audio from Monster Lab (the file on disk is not touched)", [this] { main.clearAudio(); });
+
+        auto setupCombo = [this] (juce::ComboBox& c, const juce::String& tip)
+        { c.setTooltip (tip); addAndMakeVisible (c); c.onChange = [this] { exportSettingsChanged(); }; };
+        setupCombo (fmtBox, "File format");
+        fmtBox.addItem ("WAV", 1); fmtBox.addItem ("AIFF", 2); fmtBox.addItem ("FLAC", 3);
+        setupCombo (bitsBox, "Bit depth (24-bit is right for Audition)");
+        bitsBox.addItem ("16-bit", 16); bitsBox.addItem ("24-bit", 24); bitsBox.addItem ("32-bit float", 32);
+        setupCombo (chanBox, "Mono or stereo. 'Same as original' gives mono for a mono recording.");
+        chanBox.addItem ("Same as original", 1); chanBox.addItem ("Mono", 2); chanBox.addItem ("Stereo", 3);
+        fmtBox.setSelectedId (main.exportFormat, juce::dontSendNotification);
+        bitsBox.setSelectedId (main.exportBits, juce::dontSendNotification);
+        chanBox.setSelectedId (main.exportChannels, juce::dontSendNotification);
+        exportSettingsChanged (false);
         add (saveChar, "SAVE CHARACTER", "Save the whole layer stack as a character file", [this] { main.saveCharacterDialog(); });
         add (loadChar, "LOAD CHARACTER", "Load a saved character (replaces the current stack)", [this] { main.loadCharacterDialog(); });
         add (settings, "AUDIO OUTPUT", "Choose the audio output device", [this] { main.showAudioSettings(); });
@@ -815,7 +907,18 @@ public:
         repaint (statusArea);
         repaint (infoArea);
     }
-    void audioChanged() { wave.invalidate(); repaint(); }
+    void audioChanged() { wave.invalidate(); removeBtn.setVisible (main.original != nullptr); repaint(); }
+
+    void exportSettingsChanged (bool save = true)
+    {
+        const bool wav = fmtBox.getSelectedId() == 1;
+        bitsBox.setItemEnabled (32, wav);                     // 32-bit float is WAV only
+        if (! wav && bitsBox.getSelectedId() == 32) bitsBox.setSelectedId (24, juce::dontSendNotification);
+        main.exportFormat = fmtBox.getSelectedId();
+        main.exportBits = bitsBox.getSelectedId();
+        main.exportChannels = chanBox.getSelectedId();
+        if (save) main.saveSettings();
+    }
 
     void paint (juce::Graphics& g) override
     {
@@ -832,7 +935,11 @@ public:
                  + juce::String (main.original->getNumSamples() / main.sampleRate, 2) + " s   "
                  + juce::String (main.sampleRate / 1000.0, 1) + " kHz   "
                  + (main.original->getNumChannels() > 1 ? "stereo" : "mono");
-        g.drawFittedText (info, infoArea, juce::Justification::topLeft, 2);
+        g.drawFittedText (info, infoArea.withTrimmedRight (30), juce::Justification::topLeft, 2);
+
+        g.setColour (C::dim);
+        g.setFont (uiFont (12.0f));
+        g.drawText ("EXPORT AS", exportLabelArea, juce::Justification::centredLeft);
 
         // position
         g.setColour (C::amber);
@@ -849,14 +956,38 @@ public:
         g.fillEllipse (sr.getX() + 8, sr.getY() + 10, 8, 8);
         g.setFont (uiFont (13.0f));
         g.setColour (C::text);
-        juce::String s = busy ? "Rendering...  " + juce::String ((int) (main.renderProgress.load() * 100)) + "%" : main.statusText;
-        g.drawFittedText (s, statusArea.withTrimmedLeft (24).reduced (4, 4), juce::Justification::topLeft, 4);
+        if (busy)
+        {
+            const float p = juce::jlimit (0.0f, 1.0f, main.renderProgress.load());
+            const double elapsed = (juce::Time::getMillisecondCounterHiRes() - main.renderStartMs.load()) / 1000.0;
+            juce::String line = "Processing...  " + juce::String ((int) (p * 100)) + "%";
+            if (main.renderStartMs.load() > 0 && elapsed > 0.8 && p > 0.03f && p < 0.999f)
+            {
+                const double left = elapsed / p * (1.0 - p);
+                line << "   about " << formatDuration (left) << " left";
+            }
+            else if (main.renderStartMs.load() > 0 && elapsed > 0.8)
+                line << "   " << formatDuration (elapsed) << " so far";
+            g.drawText (line, statusArea.withTrimmedLeft (24).reduced (4, 4).removeFromTop (18), juce::Justification::centredLeft);
+            auto bar = statusArea.toFloat().reduced (10, 0).withTrimmedTop (32).withHeight (8);
+            g.setColour (C::line);
+            g.fillRoundedRectangle (bar, 4.0f);
+            g.setColour (C::amber);
+            g.fillRoundedRectangle (bar.withWidth (juce::jmax (8.0f, bar.getWidth() * p)), 4.0f);
+            g.setColour (C::dim);
+            g.setFont (uiFont (12.0f));
+            g.drawFittedText ("You can keep adjusting; it restarts with your latest settings.",
+                              statusArea.reduced (10, 0).withTrimmedTop (48).withHeight (32), juce::Justification::topLeft, 2);
+        }
+        else
+            g.drawFittedText (main.statusText, statusArea.withTrimmedLeft (24).reduced (4, 4), juce::Justification::topLeft, 5);
     }
 
     void resized() override
     {
         auto r = getLocalBounds().reduced (12).withTrimmedTop (26);
         infoArea = r.removeFromTop (34);
+        removeBtn.setBounds (infoArea.getRight() - 26, infoArea.getY() + 2, 26, 24);
         wave.setBounds (r.removeFromTop (juce::jmax (140, r.getHeight() / 3)));
         r.removeFromTop (8);
         auto t = r.removeFromTop (34);
@@ -867,7 +998,14 @@ public:
         auto ab = r.removeFromTop (34);
         aBtn.setBounds (ab.removeFromLeft (ab.getWidth() / 2 - 3)); ab.removeFromLeft (6);
         bBtn.setBounds (ab);
-        r.removeFromTop (14);
+        r.removeFromTop (12);
+        exportLabelArea = r.removeFromTop (16);
+        auto ex = r.removeFromTop (28);
+        const int cw = (ex.getWidth() - 12) / 3;
+        fmtBox.setBounds (ex.removeFromLeft (cw - 20)); ex.removeFromLeft (6);
+        bitsBox.setBounds (ex.removeFromLeft (cw)); ex.removeFromLeft (6);
+        chanBox.setBounds (ex);
+        r.removeFromTop (6);
         exportBtn.setBounds (r.removeFromTop (40));
         r.removeFromTop (8);
         auto c = r.removeFromTop (32);
@@ -878,14 +1016,22 @@ public:
         open.setBounds (o.removeFromLeft (o.getWidth() / 2 - 3)); o.removeFromLeft (6);
         settings.setBounds (o);
         r.removeFromTop (12);
-        statusArea = r.removeFromTop (juce::jmin (120, r.getHeight()));
+        statusArea = r.removeFromTop (juce::jmin (130, r.getHeight()));
     }
 
     Waveform wave;
 
 private:
-    juce::TextButton open, play, stop, aBtn, bBtn, exportBtn, saveChar, loadChar, settings;
-    juce::Rectangle<int> infoArea, statusArea, timeArea;
+    static juce::String formatDuration (double sec)
+    {
+        if (sec < 60) return juce::String ((int) std::ceil (sec)) + " s";
+        const int m = (int) (sec / 60), s2 = (int) sec % 60;
+        return juce::String (m) + " min " + juce::String (s2).paddedLeft ('0', 2) + " s";
+    }
+
+    juce::TextButton open, play, stop, aBtn, bBtn, exportBtn, saveChar, loadChar, settings, removeBtn;
+    juce::ComboBox fmtBox, bitsBox, chanBox;
+    juce::Rectangle<int> infoArea, statusArea, timeArea, exportLabelArea;
 };
 
 //==============================================================================
@@ -949,6 +1095,8 @@ MainComponent::MainComponent() : juce::Thread ("Monster Lab renderer")
     lnf = std::make_unique<MonsterLookAndFeel>();
     juce::LookAndFeel::setDefaultLookAndFeel (lnf.get());
     formats.registerBasicFormats();
+    loadSettings();
+    soundLibraryFolder();   // create the Sound Library folders on first run
 
     presets    = std::make_unique<PresetPanel> (*this);
     stackPanel = std::make_unique<StackPanel> (*this);
@@ -1002,14 +1150,38 @@ void MainComponent::selfTestStep()
         case 3: if (renderUpToDate && ! renderScheduled) { snap ("2_adjusted.png"); ++selfTestStage; } break;
         case 4:
         {
-            auto f = selfTestOut.getChildFile ("selftest_export.wav");
-            log (writeProcessedWav (f) ? "export ok " + juce::String (f.getSize()) + " bytes" : juce::String ("export FAILED"));
+            auto tryExport = [&] (int fmt, int bits, int chans, const juce::String& name)
+            {
+                exportFormat = fmt; exportBits = bits; exportChannels = chans;
+                auto f = selfTestOut.getChildFile (name);
+                bool ok = writeProcessedWav (f);
+                std::unique_ptr<juce::AudioFormatReader> rd (formats.createReaderFor (f));
+                log ((ok && rd ? "export ok " : "export FAILED ") + name + " (" + exportDescription() + ")"
+                     + (rd ? "  -> " + juce::String ((int) rd->numChannels) + " ch, " + juce::String ((int) rd->bitsPerSample) + " bit, "
+                              + juce::String (rd->lengthInSamples / rd->sampleRate, 2) + " s" : juce::String()));
+            };
+            tryExport (1, 24, 1, "selftest_export.wav");
+            tryExport (1, 32, 3, "selftest_export_32f.wav");
+            tryExport (2, 24, 3, "selftest_export.aif");
+            tryExport (3, 16, 2, "selftest_export.flac");
+            exportFormat = 1; exportBits = 24; exportChannels = 1;
             playback.play(); ++selfTestStage; break;
         }
         case 5: case 6: case 7: case 8: case 9: ++selfTestStage; break;     // let playback run a moment
         case 10: log ("playback position after ~0.2 s: " + juce::String (playback.getPosition(), 3)); playback.stop();
                  addLayer (makeBuiltInPreset ("Ghost")); ++selfTestStage; break;
-        case 11: if (renderUpToDate && ! renderScheduled) { snap ("3_three_layers.png"); log ("3 layers ok: " + statusText); ++selfTestStage; } break;
+        case 11:
+            if (! renderUpToDate && renderProgress.load() > 0.25f && ! progressShot) { snap ("3a_progress.png"); progressShot = true; log ("progress shown at " + juce::String ((int) (renderProgress.load() * 100)) + "%"); }
+            if (renderUpToDate && ! renderScheduled) { snap ("3_three_layers.png"); log ("3 layers ok: " + statusText); ++selfTestStage; }
+            break;
+        case 12:
+            selectLayer (0);
+            stack[0].fx[E_Sample1].on = true;
+            stack[0].fx[E_Sample1].file = "Creature/Growls/growl.wav";
+            stack[0].fx[E_Sample1].p[0] = 1;
+            grid->rebuild(); grid->scrollToSection (Samples); parametersChanged(); log ("Demon + growl (Through)"); ++selfTestStage; break;
+        case 13: if (renderUpToDate && ! renderScheduled) { snap ("4_samples.png"); log ("samples ok: " + statusText); ++selfTestStage; } break;
+        case 14: clearAudio(); log (original == nullptr && processed == nullptr ? "remove audio ok" : "remove audio FAILED"); snap ("5_removed.png"); ++selfTestStage; break;
         default: log ("done"); juce::JUCEApplication::quit(); selfTestStage = -1; break;
     }
 }
@@ -1032,10 +1204,10 @@ void MainComponent::paint (juce::Graphics& g)
     auto top = getLocalBounds().removeFromTop (44);
     g.setColour (C::amber);
     g.setFont (monoFont (22.0f, true));
-    g.drawText ("MONSTER LAB", top.withTrimmedLeft (16), juce::Justification::centredLeft);
+    g.drawText ("DEGRAVE BROTHERS' MONSTER LAB", top.withTrimmedLeft (16), juce::Justification::centredLeft);
     g.setColour (C::dim);
     g.setFont (uiFont (13.0f));
-    g.drawText ("creature & vintage voice processor   v0.3", top.withTrimmedLeft (200), juce::Justification::centredLeft);
+    g.drawText ("creature & vintage voice processor   v0.4", top.withTrimmedLeft (420), juce::Justification::centredLeft);
     g.setColour (C::amber.withAlpha (0.5f));
     g.drawHorizontalLine (43, 0, (float) getWidth());
 }
@@ -1144,7 +1316,7 @@ void MainComponent::openAudioDialog()
                           [this] (const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) loadAudio (f); });
 }
 
-bool MainComponent::loadAudio (const juce::File& f)
+bool MainComponent::loadAudio (const juce::File& f, bool longFileConfirmed)
 {
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (f));
     if (reader == nullptr)
@@ -1153,10 +1325,25 @@ bool MainComponent::loadAudio (const juce::File& f)
         audioPanel->refresh();
         return false;
     }
-    if (reader->lengthInSamples > (juce::int64) reader->sampleRate * 60 * 20)
+    if (reader->lengthInSamples > (juce::int64) std::numeric_limits<int>::max() / 2)
     {
-        statusText = "That file is over 20 minutes. Monster Lab is designed for lines and scenes; split it first.";
+        statusText = "That file is too long for Monster Lab to hold in memory. Split it into parts first.";
         audioPanel->refresh();
+        return false;
+    }
+    const double minutes = reader->lengthInSamples / reader->sampleRate / 60.0;
+    if (minutes > 20.0 && ! longFileConfirmed)
+    {
+        juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::WarningIcon, "Long recording",
+            f.getFileName() + " is " + juce::String (minutes, 0) + " minutes long.\n\n"
+            "Every change re-processes the whole file, so with heavy layers each adjustment can take several minutes "
+            "(the progress bar shows an estimate). It may also use a lot of memory.\n\n"
+            "Tip: trim a short section to design the character, save it, then load the long file and apply it.",
+            "Load anyway", "Cancel", nullptr,
+            juce::ModalCallbackFunction::create ([sp = juce::Component::SafePointer<MainComponent> (this), f] (int r)
+            {
+                if (r == 1) if (auto* m = sp.getComponent()) m->loadAudio (f, true);
+            }));
         return false;
     }
     auto buf = std::make_shared<juce::AudioBuffer<float>> ((int) juce::jmin (2u, reader->numChannels), (int) reader->lengthInSamples);
@@ -1176,6 +1363,59 @@ bool MainComponent::loadAudio (const juce::File& f)
     return true;
 }
 
+void MainComponent::clearAudio()
+{
+    playback.stop();
+    abortRender = true;
+    ++sourceGeneration;
+    original = nullptr;
+    processed = nullptr;
+    processedPreRoll = 0;
+    sourceFile = juce::File();
+    playback.setBuffers (nullptr, nullptr, 0, sampleRate);
+    renderUpToDate = true;
+    renderScheduled = false;
+    statusText = "Audio removed. Drop in another recording to carry on; your layers are still here.";
+    audioPanel->audioChanged();
+    audioPanel->refresh();
+}
+
+static const char* exportExtension (int fmt) { return fmt == 2 ? "aif" : (fmt == 3 ? "flac" : "wav"); }
+
+juce::String MainComponent::exportDescription() const
+{
+    juce::String d = juce::String (exportFormat == 2 ? "AIFF" : (exportFormat == 3 ? "FLAC" : "WAV")) + ", ";
+    d << (exportBits == 32 ? "32-bit float" : juce::String (exportBits) + "-bit") << ", ";
+    d << (exportMono() ? "mono" : "stereo");
+    return d;
+}
+
+bool MainComponent::exportMono() const
+{
+    if (exportChannels == 2) return true;
+    if (exportChannels == 3) return false;
+    return original != nullptr && original->getNumChannels() == 1;
+}
+
+void MainComponent::loadSettings()
+{
+    auto v = juce::JSON::parse (userDataFolder().getChildFile ("settings.json"));
+    exportFormat   = juce::jlimit (1, 3, (int) v.getProperty ("exportFormat", 1));
+    exportBits     = (int) v.getProperty ("exportBits", 24);
+    if (exportBits != 16 && exportBits != 24 && exportBits != 32) exportBits = 24;
+    if (exportFormat != 1 && exportBits == 32) exportBits = 24;
+    exportChannels = juce::jlimit (1, 3, (int) v.getProperty ("exportChannels", 1));
+}
+
+void MainComponent::saveSettings()
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("exportFormat", exportFormat);
+    o->setProperty ("exportBits", exportBits);
+    o->setProperty ("exportChannels", exportChannels);
+    userDataFolder().getChildFile ("settings.json").replaceWithText (juce::JSON::toString (juce::var (o)));
+}
+
 void MainComponent::exportDialog()
 {
     if (! original) { statusText = "Load a recording first."; audioPanel->refresh(); return; }
@@ -1185,8 +1425,9 @@ void MainComponent::exportDialog()
         audioPanel->refresh();
         return;
     }
-    auto def = sourceFile.getSiblingFile (sourceFile.getFileNameWithoutExtension() + " - Monster Lab.wav");
-    chooser = std::make_unique<juce::FileChooser> ("Export processed audio", def, "*.wav");
+    const juce::String ext = exportExtension (exportFormat);
+    auto def = sourceFile.getSiblingFile (sourceFile.getFileNameWithoutExtension() + " - Monster Lab." + ext);
+    chooser = std::make_unique<juce::FileChooser> ("Export processed audio (" + exportDescription() + ")", def, "*." + ext);
     auto rate = sampleRate;
     auto pre = processedPreRoll;
     chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
@@ -1194,13 +1435,13 @@ void MainComponent::exportDialog()
     {
         auto f = fc.getResult();
         if (f == juce::File()) return;
-        f = f.withFileExtension ("wav");
+        f = f.withFileExtension (exportExtension (exportFormat));
         if (f == sourceFile) { statusText = "Refusing to overwrite the original recording. Pick another name."; audioPanel->refresh(); return; }
         bool ok = writeProcessedWav (f);
         if (! ok) statusText = "Export failed. Is the folder writable?";
         else
         {
-            statusText = "Exported " + f.getFileName() + " (24-bit).";
+            statusText = "Exported " + f.getFileName() + " (" + exportDescription() + ").";
             if (pre > 0)
                 statusText << "\nNote: it starts " << juce::String (pre / rate, 2)
                            << " s BEFORE the original (reverse-reverb swell). In Audition, place it that much earlier to line up.";
@@ -1212,13 +1453,44 @@ void MainComponent::exportDialog()
 bool MainComponent::writeProcessedWav (const juce::File& f)
 {
     if (! processed || f == sourceFile) return false;
+
+    const bool mono = exportMono();
+    const int bits = exportBits;
+    juce::AudioBuffer<float> data (mono ? 1 : 2, processed->getNumSamples());
+    if (mono)
+    {
+        data.clear();
+        data.addFrom (0, 0, *processed, 0, 0, processed->getNumSamples(), 0.5f);
+        data.addFrom (0, 0, *processed, 1, 0, processed->getNumSamples(), 0.5f);
+    }
+    else
+        data.makeCopyOf (*processed);
+
+    if (bits == 16)   // TPDF dither so quiet tails don't get grainy
+    {
+        juce::Random r (12345);
+        const float lsb = 1.0f / 32768.0f;
+        for (int ch = 0; ch < data.getNumChannels(); ++ch)
+        {
+            auto* d = data.getWritePointer (ch);
+            for (int i = 0; i < data.getNumSamples(); ++i) d[i] += (r.nextFloat() - r.nextFloat()) * lsb;
+        }
+    }
+
+    std::unique_ptr<juce::AudioFormat> format;
+    if (exportFormat == 2)      format = std::make_unique<juce::AiffAudioFormat>();
+    else if (exportFormat == 3) format = std::make_unique<juce::FlacAudioFormat>();
+    else                        format = std::make_unique<juce::WavAudioFormat>();
+
     f.deleteFile();
-    juce::WavAudioFormat wav;
     std::unique_ptr<juce::OutputStream> os (f.createOutputStream());
     if (! os) return false;
-    auto opts = juce::AudioFormatWriterOptions{}.withSampleRate (sampleRate).withNumChannels (2).withBitsPerSample (24);
-    auto w = wav.createWriterFor (os, opts);
-    return w != nullptr && w->writeFromAudioSampleBuffer (*processed, 0, processed->getNumSamples());
+    auto opts = juce::AudioFormatWriterOptions{}.withSampleRate (sampleRate).withNumChannels (data.getNumChannels())
+                    .withBitsPerSample (bits)
+                    .withSampleFormat (bits == 32 ? juce::AudioFormatWriterOptions::SampleFormat::floatingPoint
+                                                  : juce::AudioFormatWriterOptions::SampleFormat::integral);
+    auto w = format->createWriterFor (os, opts);
+    return w != nullptr && w->writeFromAudioSampleBuffer (data, 0, data.getNumSamples());
 }
 
 void MainComponent::saveCharacterDialog()
@@ -1324,6 +1596,8 @@ void MainComponent::run()
             if (srcGen != lastSourceGen) { renderer.clear(); lastSourceGen = srcGen; }
 
             auto out = std::make_shared<RenderOutput>();
+            renderProgress = 0;
+            renderStartMs = juce::Time::getMillisecondCounterHiRes();
             bool ok = renderer.render (*src, rate, st, *out, &abortRender, [this] (float p) { renderProgress = p; });
             if (ok && ! threadShouldExit())
             {
